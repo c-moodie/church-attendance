@@ -557,7 +557,7 @@ function PeoplePage({groups,classes,people,setPeople,sessions,records,deletedNam
             <div key={hid} style={{background:"#f4f8ff",border:"2px solid #dce8fa",borderRadius:12,overflow:"hidden"}}>
               {members.map((p,mi) => {
                 const isHead=p.householdRole==="head"||members.length===1;
-                const assignedClasses=classes.filter(c=>p.classIds?.includes(c.id));
+                const assignedClasses=[...classes].filter(c=>p.classIds?.includes(c.id)).sort((a,b)=>{const go=groups.findIndex(g=>g.id===a.groupId)-groups.findIndex(g=>g.id===b.groupId);return go!==0?go:a.order-b.order;});
                 return (
                   <div key={p.id} style={{display:"flex",alignItems:"center",gap:12,padding:isHead?"0.9rem 1.25rem":"0.7rem 1.25rem 0.7rem 2.75rem",borderTop:mi>0?"1px solid #dce8fa":"none",background:isHead?"#f4f8ff":"#fff"}}>
                     <button onClick={()=>setViewPerson(p)} style={{width:isHead?44:36,height:isHead?44:36,borderRadius:"50%",background:"#c7d8f0",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:"#185fa5",fontWeight:700,fontSize:isHead?14:12,border:"none",cursor:"pointer"}}>
@@ -653,7 +653,7 @@ function PersonModal({person,mode,classes,groups,people,onSave,onClose}) {
   const toggleClass=(cid)=>setF(prev=>({...prev,classIds:prev.classIds?.includes(cid)?prev.classIds.filter(x=>x!==cid):[...(prev.classIds||[]),cid]}));
   const inp={width:"100%",padding:"8px 10px",border:"1px solid #dde3ee",borderRadius:6,background:"#f8faff",color:"#1a2744",fontSize:14};
   const lbl={fontSize:12,fontWeight:500,color:"#6b7a96",display:"block",marginBottom:3};
-  const existingHeads=people.filter(p=>p.householdRole==="head"&&p.id!==f.id);
+  const existingHeads=people.filter(p=>p.householdRole==="head"&&p.id!==f.id).sort((a,b)=>sortKey(a).localeCompare(sortKey(b)));
   return (
     <Modal title={mode==="add"?"Add Person":"Edit Person"} onClose={onClose} maxWidth={520}>
       <div style={{display:"grid",gap:10}}>
