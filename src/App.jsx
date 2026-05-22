@@ -115,6 +115,18 @@ const SEED_RECORDS = [
 const load = (key, seed) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : seed; } catch { return seed; } };
 const save = (key, val)  => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} };
 
+// ─── Deleted-person name cache ───────────────────────────────────────────────
+// Maps personId -> display name, persisted so history always shows real names
+const loadDeletedNames = () => { try { return JSON.parse(localStorage.getItem("ca_deleted_names")||"{}"); } catch { return {}; } };
+const saveDeletedNames = (m) => { try { localStorage.setItem("ca_deleted_names", JSON.stringify(m)); } catch {} };
+// Resolve a personId to a display name given current people list + deleted cache
+const resolveName = (pid, people, deletedNames) => {
+  const p = people.find(x=>x.id===pid);
+  if (p) return fullName(p);
+  if (deletedNames[pid]) return `${deletedNames[pid]} (deleted)`;
+  return "(deleted)";
+};
+
 // ─── Shared UI ───────────────────────────────────────────────────────────────
 function PageHeader({ title, actions }) {
   return (
@@ -193,17 +205,19 @@ export default function App() {
   const [page,     setPage]     = useState("dashboard");
   const [navOpen,  setNavOpen]  = useState(false);
 
-  const [groups,   setGroups]   = useState(() => load("ca_groups",   SEED_GROUPS));
-  const [classes,  setClasses]  = useState(() => load("ca_classes",  SEED_CLASSES));
-  const [people,   setPeople]   = useState(() => load("ca_people",   SEED_PEOPLE));
-  const [sessions, setSessions] = useState(() => load("ca_sessions", SEED_SESSIONS));
-  const [records,  setRecords]  = useState(() => load("ca_records",  SEED_RECORDS));
+  const [groups,       setGroups]       = useState(() => load("ca_groups",   SEED_GROUPS));
+  const [classes,      setClasses]      = useState(() => load("ca_classes",  SEED_CLASSES));
+  const [people,       setPeople]       = useState(() => load("ca_people",   SEED_PEOPLE));
+  const [sessions,     setSessions]     = useState(() => load("ca_sessions", SEED_SESSIONS));
+  const [records,      setRecords]      = useState(() => load("ca_records",  SEED_RECORDS));
+  const [deletedNames, setDeletedNames] = useState(() => loadDeletedNames());
 
   useEffect(() => save("ca_groups",   groups),   [groups]);
   useEffect(() => save("ca_classes",  classes),  [classes]);
   useEffect(() => save("ca_people",   people),   [people]);
   useEffect(() => save("ca_sessions", sessions), [sessions]);
   useEffect(() => save("ca_records",  records),  [records]);
+  useEffect(() => saveDeletedNames(deletedNames), [deletedNames]);
 
   if (!authed) return <Login onLogin={() => { sessionStorage.setItem("ca_auth","1"); setAuthed(true); }} />;
 
@@ -216,7 +230,7 @@ export default function App() {
     { id:"history",    icon:"ti-history",         label:"History"    },
   ];
 
-  const ctx = { groups, setGroups, classes, setClasses, people, setPeople, sessions, setSessions, records, setRecords };
+  const ctx = { groups, setGroups, classes, setClasses, people, setPeople, sessions, setSessions, records, setRecords, deletedNames, setDeletedNames };
 
   const SidebarNav = ({ onNav }) => (
     <nav style={{ padding:"0.75rem 0.5rem", flex:1 }}>
@@ -333,7 +347,10 @@ function Dashboard({ groups, classes, sessions, records, setPage }) {
   const we = weekEndFromDate(weekAnchor);
   const thisSessions = sessions.filter(s => { const d=new Date(s.date+"T12:00:00"); return d>=ws&&d<=we; });
 
-  const classStats = classes.map(cl => {
+  const sortedGroups  = useMemo(() => [...groups].sort((a,b)=>a.order-b.order),  [groups]);
+  const sortedClasses = useMemo(() => [...classes].sort((a,b)=>a.order-b.order), [classes]);
+
+  const classStats = sortedClasses.map(cl => {
     const sess = thisSessions.filter(s=>s.classId===cl.id);
     const sessIds = sess.map(s=>s.id);
     const members = records.filter(r=>sessIds.includes(r.sessionId)&&r.present).length;
@@ -341,7 +358,7 @@ function Dashboard({ groups, classes, sessions, records, setPage }) {
     return { classId:cl.id, classNm:cl.name, groupId:cl.groupId, members, visitors, total:members+visitors };
   });
 
-  const groupStats = groups.map(g => {
+  const groupStats = sortedGroups.map(g => {
     const gClasses = classStats.filter(cs=>cs.groupId===g.id);
     const gSessIds = sessions.filter(s=>{ const d=new Date(s.date+"T12:00:00"); return gClasses.find(c=>c.classId===s.classId)&&d>=ws&&d<=we; }).map(s=>s.id);
     const unique = new Set(records.filter(r=>gSessIds.includes(r.sessionId)&&r.present).map(r=>r.personId));
@@ -368,19 +385,19 @@ function Dashboard({ groups, classes, sessions, records, setPage }) {
 
       <h3 style={{ fontSize:15, fontWeight:600, marginBottom:"0.75rem", color:"var(--color-text-primary)" }}>By Group</h3>
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:12, marginBottom:"2rem" }}>
-        {groupStats.map(g => <StatCard key={g.id} label={g.name} total={g.total} members={g.members} visitors={g.visitors} groupId={g.id} groups={groups} />)}
+        {groupStats.map(g => <StatCard key={g.id} label={g.name} total={g.total} members={g.members} visitors={g.visitors} groupId={g.id} groups={sortedGroups} />)}
       </div>
 
       <h3 style={{ fontSize:15, fontWeight:600, marginBottom:"0.75rem", color:"var(--color-text-primary)" }}>By Class</h3>
       <div style={{ background:"var(--color-background-primary)", border:"1px solid var(--color-border-tertiary)", borderRadius:12, overflow:"hidden" }}>
         {classStats.every(cs=>cs.total===0) ? <Empty msg="No attendance recorded for this week" /> : classStats.filter(cs=>cs.total>0).map((cs,i,arr) => {
-          const pal = getGroupPalette(cs.groupId, groups);
+          const pal = getGroupPalette(cs.groupId, sortedGroups);
           return (
             <div key={cs.classId} style={{ display:"flex", alignItems:"center", padding:"0.85rem 1.25rem", borderBottom:i<arr.length-1?"1px solid var(--color-border-tertiary)":"none", gap:12 }}>
               <div style={{ width:4, height:32, borderRadius:4, background:pal.accent, flexShrink:0 }} />
               <div style={{ flex:1, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
                 <span style={{ fontWeight:500, fontSize:14, color:"var(--color-text-primary)" }}>{cs.classNm}</span>
-                <GroupBadge groupId={cs.groupId} groups={groups} label={groups.find(g=>g.id===cs.groupId)?.name} />
+                <GroupBadge groupId={cs.groupId} groups={sortedGroups} label={sortedGroups.find(g=>g.id===cs.groupId)?.name} />
               </div>
               <div style={{ display:"flex", gap:16, fontSize:13 }}>
                 <span><strong style={{ color:"var(--color-text-primary)" }}>{cs.members}</strong> <span style={{ color:"var(--color-text-secondary)" }}>mbr</span></span>
@@ -411,14 +428,15 @@ function AttendancePage({ groups, classes, people, sessions, setSessions, record
   const [visitors, setVisitors] = useState(0);
   const [saved,    setSaved]    = useState(false);
 
-  const cls = classes.find(c=>c.id===selClass);
-  const grp = cls ? groups.find(g=>g.id===cls.groupId) : null;
-  const pal = cls ? getGroupPalette(cls.groupId, groups) : null;
+  const sortedGroups  = useMemo(() => [...groups].sort((a,b)=>a.order-b.order),  [groups]);
+  const sortedClasses = useMemo(() => [...classes].sort((a,b)=>a.order-b.order), [classes]);
 
-  // Group members by household, sorted by lastName then firstName
+  const cls = sortedClasses.find(c=>c.id===selClass);
+  const grp = cls ? sortedGroups.find(g=>g.id===cls.groupId) : null;
+  const pal = cls ? getGroupPalette(cls.groupId, sortedGroups) : null;
+
   const classMembers = useMemo(() => {
     const members = people.filter(p=>p.classIds?.includes(selClass));
-    // Build household groups: heads first, then members sorted under their head
     const heads   = members.filter(p=>p.householdRole==="head" || !p.householdId).sort((a,b)=>sortKey(a).localeCompare(sortKey(b)));
     const nonHeads= members.filter(p=>p.householdRole!=="head" && p.householdId);
     const result  = [];
@@ -431,7 +449,6 @@ function AttendancePage({ groups, classes, people, sessions, setSessions, record
         usedIds.add(m.id);
       });
     });
-    // any non-heads whose head isn't in this class
     nonHeads.filter(p=>!usedIds.has(p.id)).sort((a,b)=>sortKey(a).localeCompare(sortKey(b))).forEach(p=>result.push({...p,_isHead:false}));
     return result;
   }, [people, selClass]);
@@ -489,9 +506,9 @@ function AttendancePage({ groups, classes, people, sessions, setSessions, record
             <label style={{ fontSize:12, fontWeight:500, color:"var(--color-text-secondary)", display:"block", marginBottom:4 }}>Class</label>
             <select value={selClass} onChange={e=>setSelClass(e.target.value)}
               style={{ width:"100%", padding:"9px 12px", border:"1px solid var(--color-border-tertiary)", borderRadius:8, background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontSize:14 }}>
-              {groups.map(g=>(
+              {sortedGroups.map(g=>(
                 <optgroup key={g.id} label={g.name}>
-                  {classes.filter(c=>c.groupId===g.id).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                  {sortedClasses.filter(c=>c.groupId===g.id).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                 </optgroup>
               ))}
             </select>
@@ -559,7 +576,7 @@ function AttendancePage({ groups, classes, people, sessions, setSessions, record
 }
 
 // ─── People Page ──────────────────────────────────────────────────────────────
-function PeoplePage({ groups, classes, people, setPeople, sessions, records }) {
+function PeoplePage({ groups, classes, people, setPeople, sessions, records, deletedNames, setDeletedNames }) {
   const [search,     setSearch]     = useState("");
   const [modal,      setModal]      = useState(null);
   const [delConfirm, setDelConfirm] = useState(null);
@@ -577,17 +594,15 @@ function PeoplePage({ groups, classes, people, setPeople, sessions, records }) {
   const households = useMemo(() => {
     const map = {};
     filtered.forEach(p => {
-      const hid = p.householdId || p.id; // ungrouped people are their own "household"
+      const hid = p.householdId || p.id;
       if (!map[hid]) map[hid] = [];
       map[hid].push(p);
     });
-    // Sort each household: head first, then alphabetically
     Object.values(map).forEach(arr => arr.sort((a,b) => {
       const aHead = a.householdRole==="head" ? 0 : a.householdRole==="spouse" ? 1 : 2;
       const bHead = b.householdRole==="head" ? 0 : b.householdRole==="spouse" ? 1 : 2;
       return aHead!==bHead ? aHead-bHead : sortKey(a).localeCompare(sortKey(b));
     }));
-    // Sort households by the head's last name
     return Object.entries(map).sort(([,a],[,b]) => {
       const ah = a.find(p=>p.householdRole==="head")||a[0];
       const bh = b.find(p=>p.householdRole==="head")||b[0];
@@ -600,8 +615,13 @@ function PeoplePage({ groups, classes, people, setPeople, sessions, records }) {
     else                    setPeople(prev=>prev.map(x=>x.id===p.id?p:x));
     setModal(null);
   };
-  // Delete person but KEEP records (orphaned personId in records = intentional for history)
-  const del = (id) => { setPeople(prev=>prev.filter(p=>p.id!==id)); setDelConfirm(null); };
+  // Cache name before deleting so history can still show it
+  const del = (id) => {
+    const p = people.find(x=>x.id===id);
+    if (p) setDeletedNames(prev => ({ ...prev, [id]: fullName(p) }));
+    setPeople(prev=>prev.filter(x=>x.id!==id));
+    setDelConfirm(null);
+  };
 
   return (
     <div>
@@ -678,7 +698,7 @@ function PeoplePage({ groups, classes, people, setPeople, sessions, records }) {
         msg={`Remove ${fullName(people.find(p=>p.id===delConfirm))} from the people list? Their attendance history will be preserved.`}
         confirmLabel="Remove"
         onConfirm={()=>del(delConfirm)} onClose={()=>setDelConfirm(null)} />}
-      {viewPerson && <PersonAttendanceModal person={viewPerson} classes={classes} groups={groups} sessions={sessions} records={records} setRecords={setRecords} onClose={()=>setViewPerson(null)} />}
+      {viewPerson && <PersonAttendanceModal person={viewPerson} classes={classes} groups={groups} sessions={sessions} records={records} setRecords={setRecords} deletedNames={deletedNames} onClose={()=>setViewPerson(null)} />}
     </div>
   );
 }
@@ -829,7 +849,7 @@ function PersonModal({ person, mode, classes, groups, people, onSave, onClose })
         {/* Assigned classes */}
         <div style={{ borderTop:"1px solid #e8edf5", paddingTop:10 }}>
           <label style={{ ...lbl, marginBottom:8 }}>Assigned Classes</label>
-          {groups.map(g=>{
+          {[...groups].sort((a,b)=>a.order-b.order).map(g=>{
             const pal=getGroupPalette(g.id,groups);
             return (
               <div key={g.id} style={{ marginBottom:10 }}>
@@ -838,7 +858,7 @@ function PersonModal({ person, mode, classes, groups, people, onSave, onClose })
                   <p style={{ fontSize:12, color:pal.text, margin:0, fontWeight:600 }}>{g.name}</p>
                 </div>
                 <div style={{ display:"flex", gap:6, flexWrap:"wrap", paddingLeft:14 }}>
-                  {classes.filter(c=>c.groupId===g.id).map(c=>(
+                  {[...classes].filter(c=>c.groupId===g.id).sort((a,b)=>a.order-b.order).map(c=>(
                     <button key={c.id} onClick={()=>toggleClass(c.id)} style={{ padding:"4px 12px", fontSize:12, borderRadius:6, cursor:"pointer", border:"1px solid", background:f.classIds?.includes(c.id)?pal.accent:pal.bg, color:f.classIds?.includes(c.id)?"#fff":pal.text, borderColor:f.classIds?.includes(c.id)?pal.accent:pal.border }}>{c.name}</button>
                   ))}
                 </div>
@@ -857,13 +877,19 @@ function PersonModal({ person, mode, classes, groups, people, onSave, onClose })
   );
 }
 
-// ─── Groups Page ──────────────────────────────────────────────────────────────
+// ─── Groups Page (with manual reorder) ───────────────────────────────────────
 function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople }) {
   const [editItem,   setEditItem]   = useState(null);
   const [addMode,    setAddMode]    = useState(null);
   const [addName,    setAddName]    = useState("");
   const [addGroupId, setAddGroupId] = useState("");
   const [delConfirm, setDelConfirm] = useState(null);
+  const [dragging,   setDragging]   = useState(null); // { type:"group"|"class", id, groupId? }
+  const [dragOver,   setDragOver]   = useState(null);
+
+  // Always work with ordered lists
+  const sortedGroups = useMemo(() => [...groups].sort((a,b)=>a.order-b.order), [groups]);
+  const sortedClasses = useMemo(() => [...classes].sort((a,b)=>a.order-b.order), [classes]);
 
   const saveEdit = () => {
     if (!editItem) return;
@@ -871,12 +897,14 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
     else                         setClasses(prev=>prev.map(c=>c.id===editItem.id?{...c,name:editItem.name}:c));
     setEditItem(null);
   };
+
   const addNew = () => {
     if (!addName.trim()) return;
     if (addMode==="group") setGroups(prev=>[...prev,{id:uid(),name:addName.trim(),type:"group",order:prev.length}]);
     else setClasses(prev=>[...prev,{id:uid(),name:addName.trim(),groupId:addGroupId||groups[0]?.id,order:prev.filter(c=>c.groupId===addGroupId).length}]);
     setAddName(""); setAddMode(null);
   };
+
   const delGroup = (gid) => {
     const cids=classes.filter(c=>c.groupId===gid).map(c=>c.id);
     setClasses(prev=>prev.filter(c=>c.groupId!==gid));
@@ -888,6 +916,81 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
     setClasses(prev=>prev.filter(c=>c.id!==cid)); setDelConfirm(null);
   };
 
+  // Move group up/down
+  const moveGroup = (id, dir) => {
+    setGroups(prev => {
+      const arr = [...prev].sort((a,b)=>a.order-b.order);
+      const idx = arr.findIndex(g=>g.id===id);
+      const swapIdx = idx + dir;
+      if (swapIdx < 0 || swapIdx >= arr.length) return prev;
+      const newArr = arr.map((g,i) => {
+        if (i===idx)     return {...g, order: arr[swapIdx].order};
+        if (i===swapIdx) return {...g, order: arr[idx].order};
+        return g;
+      });
+      return newArr;
+    });
+  };
+
+  // Move class up/down within its group
+  const moveClass = (id, dir) => {
+    setClasses(prev => {
+      const cls = prev.find(c=>c.id===id);
+      if (!cls) return prev;
+      const siblings = [...prev].filter(c=>c.groupId===cls.groupId).sort((a,b)=>a.order-b.order);
+      const idx = siblings.findIndex(c=>c.id===id);
+      const swapIdx = idx + dir;
+      if (swapIdx < 0 || swapIdx >= siblings.length) return prev;
+      const swapId = siblings[swapIdx].id;
+      return prev.map(c => {
+        if (c.id===id)     return {...c, order: siblings[swapIdx].order};
+        if (c.id===swapId) return {...c, order: cls.order};
+        return c;
+      });
+    });
+  };
+
+  // Drag-and-drop for groups
+  const onGroupDragStart = (e, id) => { setDragging({type:"group",id}); e.dataTransfer.effectAllowed="move"; };
+  const onGroupDragOver  = (e, id) => { e.preventDefault(); setDragOver({type:"group",id}); };
+  const onGroupDrop      = (e, targetId) => {
+    e.preventDefault();
+    if (!dragging || dragging.type!=="group" || dragging.id===targetId) { setDragging(null); setDragOver(null); return; }
+    setGroups(prev => {
+      const arr = [...prev].sort((a,b)=>a.order-b.order);
+      const fromIdx = arr.findIndex(g=>g.id===dragging.id);
+      const toIdx   = arr.findIndex(g=>g.id===targetId);
+      const item = arr.splice(fromIdx,1)[0];
+      arr.splice(toIdx,0,item);
+      return arr.map((g,i)=>({...g,order:i}));
+    });
+    setDragging(null); setDragOver(null);
+  };
+
+  // Drag-and-drop for classes within a group
+  const onClassDragStart = (e, id, groupId) => { setDragging({type:"class",id,groupId}); e.dataTransfer.effectAllowed="move"; };
+  const onClassDragOver  = (e, id)           => { e.preventDefault(); setDragOver({type:"class",id}); };
+  const onClassDrop      = (e, targetId, groupId) => {
+    e.preventDefault();
+    if (!dragging || dragging.type!=="class" || dragging.id===targetId || dragging.groupId!==groupId) { setDragging(null); setDragOver(null); return; }
+    setClasses(prev => {
+      const siblings = [...prev].filter(c=>c.groupId===groupId).sort((a,b)=>a.order-b.order);
+      const fromIdx = siblings.findIndex(c=>c.id===dragging.id);
+      const toIdx   = siblings.findIndex(c=>c.id===targetId);
+      const item = siblings.splice(fromIdx,1)[0];
+      siblings.splice(toIdx,0,item);
+      const reordered = siblings.map((c,i)=>({...c,order:i}));
+      return prev.map(c => { const r=reordered.find(x=>x.id===c.id); return r||c; });
+    });
+    setDragging(null); setDragOver(null);
+  };
+
+  const btnArrow = (onClick, icon, disabled) => (
+    <button onClick={onClick} disabled={disabled} style={{ padding:"4px 5px", background:"transparent", border:"none", cursor:disabled?"default":"pointer", color:"#8896b0", opacity:disabled?0.25:0.7, fontSize:13, lineHeight:1 }}>
+      <i className={`ti ${icon}`} />
+    </button>
+  );
+
   return (
     <div>
       <PageHeader title="Groups & Classes" actions={<>
@@ -895,12 +998,16 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
         <button onClick={()=>setAddMode("group")} style={{ padding:"9px 14px", background:"#3b5bdb", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontWeight:600, fontSize:14 }}>+ Group</button>
       </>} />
 
+      <p style={{ fontSize:12, color:"var(--color-text-secondary)", margin:"-0.5rem 0 1rem" }}>
+        Drag groups or classes to reorder, or use the ↑↓ arrows. Order is reflected everywhere in the app.
+      </p>
+
       {addMode && (
         <div style={{ background:"var(--color-background-primary)", border:"1px solid #3b5bdb", borderRadius:12, padding:"1.25rem", marginBottom:"1rem" }}>
           <p style={{ margin:"0 0 10px", fontWeight:600, fontSize:14, color:"var(--color-text-primary)" }}>New {addMode==="group"?"Group":"Class"}</p>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            <input value={addName} onChange={e=>setAddName(e.target.value)} placeholder="Name" style={{ flex:1, minWidth:160, padding:"8px 12px", border:"1px solid var(--color-border-tertiary)", borderRadius:8, background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontSize:14 }} />
-            {addMode==="class" && <select value={addGroupId} onChange={e=>setAddGroupId(e.target.value)} style={{ padding:"8px 12px", border:"1px solid var(--color-border-tertiary)", borderRadius:8, background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontSize:14 }}>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</select>}
+            <input value={addName} onChange={e=>setAddName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addNew()} placeholder="Name" style={{ flex:1, minWidth:160, padding:"8px 12px", border:"1px solid var(--color-border-tertiary)", borderRadius:8, background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontSize:14 }} />
+            {addMode==="class" && <select value={addGroupId} onChange={e=>setAddGroupId(e.target.value)} style={{ padding:"8px 12px", border:"1px solid var(--color-border-tertiary)", borderRadius:8, background:"var(--color-background-secondary)", color:"var(--color-text-primary)", fontSize:14 }}>{sortedGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</select>}
             <button onClick={addNew} style={{ padding:"8px 16px", background:"#3b5bdb", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", fontWeight:600, fontSize:14 }}>Add</button>
             <button onClick={()=>{setAddMode(null);setAddName("");}} style={{ padding:"8px 12px", border:"1px solid var(--color-border-tertiary)", background:"var(--color-background-secondary)", borderRadius:8, cursor:"pointer", color:"var(--color-text-primary)" }}>Cancel</button>
           </div>
@@ -908,11 +1015,21 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
       )}
 
       <div style={{ display:"grid", gap:14 }}>
-        {groups.map(g => {
-          const pal=getGroupPalette(g.id,groups);
+        {sortedGroups.map((g, gi) => {
+          const pal = getGroupPalette(g.id, groups);
+          const groupClasses = sortedClasses.filter(c=>c.groupId===g.id);
+          const isDragTarget = dragOver?.type==="group" && dragOver?.id===g.id;
           return (
-            <div key={g.id} style={{ borderRadius:12, overflow:"hidden", border:`1.5px solid ${pal.border}` }}>
-              <div style={{ padding:"0.9rem 1.25rem", background:pal.header, borderBottom:`2px solid ${pal.border}`, display:"flex", alignItems:"center", gap:10 }}>
+            <div key={g.id}
+              draggable
+              onDragStart={e=>onGroupDragStart(e,g.id)}
+              onDragOver={e=>onGroupDragOver(e,g.id)}
+              onDragLeave={()=>setDragOver(null)}
+              onDrop={e=>onGroupDrop(e,g.id)}
+              style={{ borderRadius:12, overflow:"hidden", border:`1.5px solid ${isDragTarget?"#3b5bdb":pal.border}`, opacity:dragging?.type==="group"&&dragging?.id===g.id?0.5:1, transition:"opacity 0.15s, border-color 0.15s", cursor:"grab" }}>
+              <div style={{ padding:"0.9rem 1.25rem", background:pal.header, borderBottom:`2px solid ${pal.border}`, display:"flex", alignItems:"center", gap:8 }}>
+                {/* Drag handle */}
+                <i className="ti ti-grip-vertical" style={{ fontSize:16, color:pal.text, opacity:0.4, cursor:"grab", flexShrink:0 }} />
                 <div style={{ width:28, height:28, borderRadius:8, background:pal.accent, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
                   <i className="ti ti-layout-list" style={{ fontSize:14, color:"#fff" }} />
                 </div>
@@ -920,28 +1037,48 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
                   ? <input value={editItem.name} onChange={e=>setEditItem({...editItem,name:e.target.value})} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{ flex:1, padding:"4px 8px", border:`1px solid ${pal.border}`, borderRadius:6, background:"#fff", color:"#1a2744", fontSize:14 }} />
                   : <span style={{ flex:1, fontWeight:700, fontSize:15, color:pal.text }}>{g.name}</span>
                 }
-                <span style={{ fontSize:12, color:pal.text, opacity:0.7, background:pal.bg, padding:"2px 8px", borderRadius:4, border:`1px solid ${pal.border}` }}>{classes.filter(c=>c.groupId===g.id).length} classes</span>
+                <span style={{ fontSize:12, color:pal.text, opacity:0.7, background:pal.bg, padding:"2px 8px", borderRadius:4, border:`1px solid ${pal.border}`, flexShrink:0 }}>{groupClasses.length} classes</span>
+                {/* Up/down arrows */}
+                <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+                  {btnArrow(e=>{e.stopPropagation();moveGroup(g.id,-1);}, "ti-chevron-up",   gi===0)}
+                  {btnArrow(e=>{e.stopPropagation();moveGroup(g.id,+1);}, "ti-chevron-down", gi===sortedGroups.length-1)}
+                </div>
                 {editItem?.id===g.id
                   ? <button onClick={saveEdit} style={{ padding:"4px 10px", background:pal.accent, color:"#fff", border:"none", borderRadius:6, cursor:"pointer", fontSize:12 }}>Save</button>
-                  : <button onClick={()=>setEditItem({...g,type:"group"})} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:pal.text, opacity:0.6 }}><i className="ti ti-edit" style={{ fontSize:15 }} /></button>
+                  : <button onClick={e=>{e.stopPropagation();setEditItem({...g,type:"group"});}} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:pal.text, opacity:0.6 }}><i className="ti ti-edit" style={{ fontSize:15 }} /></button>
                 }
-                <button onClick={()=>setDelConfirm({type:"group",id:g.id,name:g.name})} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:"#e24b4a" }}><i className="ti ti-trash" style={{ fontSize:15 }} /></button>
+                <button onClick={e=>{e.stopPropagation();setDelConfirm({type:"group",id:g.id,name:g.name});}} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:"#e24b4a" }}><i className="ti ti-trash" style={{ fontSize:15 }} /></button>
               </div>
-              {classes.filter(c=>c.groupId===g.id).map(cls=>(
-                <div key={cls.id} style={{ padding:"0.7rem 1.25rem 0.7rem 1rem", borderTop:`1px solid ${pal.border}`, background:pal.bg, display:"flex", alignItems:"center", gap:10 }}>
-                  <div style={{ width:3, height:24, borderRadius:2, background:pal.accent, flexShrink:0, marginLeft:8 }} />
-                  {editItem?.id===cls.id
-                    ? <input value={editItem.name} onChange={e=>setEditItem({...editItem,name:e.target.value})} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{ flex:1, padding:"4px 8px", border:`1px solid ${pal.border}`, borderRadius:6, background:"#fff", color:"#1a2744", fontSize:14 }} />
-                    : <span style={{ flex:1, fontSize:14, color:pal.text, fontWeight:500 }}>{cls.name}</span>
-                  }
-                  <span style={{ fontSize:12, color:pal.text, opacity:0.65 }}>{people.filter(p=>p.classIds?.includes(cls.id)).length} members</span>
-                  {editItem?.id===cls.id
-                    ? <button onClick={saveEdit} style={{ padding:"4px 10px", background:pal.accent, color:"#fff", border:"none", borderRadius:6, cursor:"pointer", fontSize:12 }}>Save</button>
-                    : <button onClick={()=>setEditItem({...cls,type:"class"})} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:pal.text, opacity:0.6 }}><i className="ti ti-edit" style={{ fontSize:15 }} /></button>
-                  }
-                  <button onClick={()=>setDelConfirm({type:"class",id:cls.id,name:cls.name})} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:"#e24b4a" }}><i className="ti ti-trash" style={{ fontSize:15 }} /></button>
-                </div>
-              ))}
+              {groupClasses.map((cls, ci) => {
+                const isClassTarget = dragOver?.type==="class" && dragOver?.id===cls.id;
+                return (
+                  <div key={cls.id}
+                    draggable
+                    onDragStart={e=>{e.stopPropagation();onClassDragStart(e,cls.id,g.id);}}
+                    onDragOver={e=>{e.stopPropagation();onClassDragOver(e,cls.id);}}
+                    onDragLeave={e=>{e.stopPropagation();setDragOver(null);}}
+                    onDrop={e=>{e.stopPropagation();onClassDrop(e,cls.id,g.id);}}
+                    style={{ padding:"0.7rem 1.25rem 0.7rem 1rem", borderTop:`1px solid ${pal.border}`, background:isClassTarget?"rgba(59,91,219,0.06)":pal.bg, display:"flex", alignItems:"center", gap:8, opacity:dragging?.type==="class"&&dragging?.id===cls.id?0.4:1, cursor:"grab" }}>
+                    <i className="ti ti-grip-vertical" style={{ fontSize:14, color:pal.text, opacity:0.3, cursor:"grab", flexShrink:0 }} />
+                    <div style={{ width:3, height:24, borderRadius:2, background:pal.accent, flexShrink:0, marginLeft:4 }} />
+                    {editItem?.id===cls.id
+                      ? <input value={editItem.name} onChange={e=>setEditItem({...editItem,name:e.target.value})} onKeyDown={e=>e.key==="Enter"&&saveEdit()} autoFocus style={{ flex:1, padding:"4px 8px", border:`1px solid ${pal.border}`, borderRadius:6, background:"#fff", color:"#1a2744", fontSize:14 }} />
+                      : <span style={{ flex:1, fontSize:14, color:pal.text, fontWeight:500 }}>{cls.name}</span>
+                    }
+                    <span style={{ fontSize:12, color:pal.text, opacity:0.65, flexShrink:0 }}>{people.filter(p=>p.classIds?.includes(cls.id)).length} members</span>
+                    {/* Up/down arrows for classes within group */}
+                    <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+                      {btnArrow(e=>{e.stopPropagation();moveClass(cls.id,-1);}, "ti-chevron-up",   ci===0)}
+                      {btnArrow(e=>{e.stopPropagation();moveClass(cls.id,+1);}, "ti-chevron-down", ci===groupClasses.length-1)}
+                    </div>
+                    {editItem?.id===cls.id
+                      ? <button onClick={saveEdit} style={{ padding:"4px 10px", background:pal.accent, color:"#fff", border:"none", borderRadius:6, cursor:"pointer", fontSize:12 }}>Save</button>
+                      : <button onClick={e=>{e.stopPropagation();setEditItem({...cls,type:"class"});}} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:pal.text, opacity:0.6 }}><i className="ti ti-edit" style={{ fontSize:15 }} /></button>
+                    }
+                    <button onClick={e=>{e.stopPropagation();setDelConfirm({type:"class",id:cls.id,name:cls.name});}} style={{ padding:"5px", background:"transparent", border:"none", cursor:"pointer", color:"#e24b4a" }}><i className="ti ti-trash" style={{ fontSize:15 }} /></button>
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -952,7 +1089,7 @@ function GroupsPage({ groups, setGroups, classes, setClasses, people, setPeople 
 }
 
 // ─── History Page ─────────────────────────────────────────────────────────────
-function HistoryPage({ groups, classes, people, sessions, setSessions, records, setRecords }) {
+function HistoryPage({ groups, classes, people, sessions, setSessions, records, setRecords, deletedNames }) {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo,   setFilterDateTo]   = useState("");
   const [filterGroup,    setFilterGroup]    = useState("");
@@ -986,9 +1123,10 @@ function HistoryPage({ groups, classes, people, sessions, setSessions, records, 
       } else {
         presentRecords.forEach((r,ri) => {
           const person = people.find(p=>p.id===r.personId);
-          const fn = person ? person.firstName||"" : "(deleted)";
-          const ln = person ? person.lastName||"" : "";
-          rows.push([s.date, cls?.name||"", grp?.name||"", fn, ln, "Present", ri===0?s.visitors||0:""]);
+          const fn = person ? (person.firstName||"") : (deletedNames[r.personId] ? deletedNames[r.personId].split(" ").slice(0,-1).join(" ")||deletedNames[r.personId] : "?");
+          const ln = person ? (person.lastName||"") : (deletedNames[r.personId] ? (deletedNames[r.personId].split(" ").slice(-1)[0]||"") : "(deleted)");
+          const deletedTag = !person ? " (deleted)" : "";
+          rows.push([s.date, cls?.name||"", grp?.name||"", fn+deletedTag, ln, "Present", ri===0?s.visitors||0:""]);
         });
       }
     });
@@ -1056,7 +1194,14 @@ function HistoryPage({ groups, classes, people, sessions, setSessions, records, 
             const sessionPresentPeople = people.filter(p=>records.find(r=>r.sessionId===s.id&&r.personId===p.id&&r.present));
             // Also include deleted people who were present
             const presentRecordIds = records.filter(r=>r.sessionId===s.id&&r.present).map(r=>r.personId);
-            const allPresentPeople = presentRecordIds.map(pid=>people.find(p=>p.id===pid)||{id:pid,firstName:"(deleted)",lastName:"",classIds:[]});
+            const allPresentPeople = presentRecordIds.map(pid => {
+              const p = people.find(x=>x.id===pid);
+              if (p) return p;
+              // deleted — build a display-only object with their cached name
+              const cached = deletedNames[pid];
+              const parts = cached ? cached.split(" ") : [];
+              return { id:pid, firstName: parts.slice(0,-1).join(" ")||cached||"?", lastName: parts.length>1?parts[parts.length-1]:"", _deleted:true, classIds:[] };
+            });
             return (
               <div key={s.id} style={{ background:"var(--color-background-primary)", border:`1.5px solid ${pal?pal.border:"var(--color-border-tertiary)"}`, borderRadius:12, overflow:"hidden" }}>
                 <div style={{ padding:"0.9rem 1.25rem", display:"flex", alignItems:"center", gap:12, flexWrap:"wrap", borderLeft:`4px solid ${pal?pal.accent:"#3b5bdb"}` }}>
@@ -1091,11 +1236,14 @@ function HistoryPage({ groups, classes, people, sessions, setSessions, records, 
                         ? <p style={{ fontSize:13, color:"#8896b0", margin:0 }}>No members marked present.</p>
                         : allPresentPeople.map((p,i) => (
                           <div key={p.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", borderRadius:6, background:i%2===0?"#f4f8ff":"#ffffff", border:"1px solid #dce8fa" }}>
-                            <div style={{ width:28, height:28, borderRadius:"50%", background:"#0c8c6e", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:11, fontWeight:600, flexShrink:0 }}>
+                            <div style={{ width:28, height:28, borderRadius:"50%", background: p._deleted ? "#b0bfd6" : "#0c8c6e", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontSize:11, fontWeight:600, flexShrink:0 }}>
                               {initials(p)}
                             </div>
-                            <span style={{ flex:1, fontSize:13, color:"var(--color-text-primary)" }}>{fullName(p)}</span>
-                            <button onClick={()=>toggleRecord(s.id,p.id)} style={{ padding:"4px 8px", fontSize:11, border:"1px solid #f7c1c1", background:"#fcebeb", borderRadius:5, cursor:"pointer", color:"#a32d2d" }}>Remove</button>
+                            <span style={{ flex:1, fontSize:13, color:"var(--color-text-primary)" }}>
+                              {fullName(p)}
+                              {p._deleted && <span style={{ marginLeft:5, fontSize:11, color:"#a32d2d", background:"#fcebeb", border:"1px solid #f7c1c1", borderRadius:4, padding:"1px 5px" }}>deleted</span>}
+                            </span>
+                            {!p._deleted && <button onClick={()=>toggleRecord(s.id,p.id)} style={{ padding:"4px 8px", fontSize:11, border:"1px solid #f7c1c1", background:"#fcebeb", borderRadius:5, cursor:"pointer", color:"#a32d2d" }}>Remove</button>}
                           </div>
                         ))
                       }
