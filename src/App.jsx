@@ -308,7 +308,10 @@ function Dashboard({groups,classes,sessions,records,setPage}) {
   const we = weekEndFromDate(weekAnchor);
   const thisSessions = sessions.filter(s => { const d=new Date(s.date+"T12:00:00"); return d>=ws&&d<=we; });
   const sortedGroups  = useMemo(() => [...groups].sort((a,b)=>a.order-b.order),  [groups]);
-  const sortedClasses = useMemo(() => [...classes].sort((a,b)=>a.order-b.order), [classes]);
+  const sortedClasses = useMemo(() => [...classes].sort((a,b)=>{
+    const go=sortedGroups.findIndex(g=>g.id===a.groupId)-sortedGroups.findIndex(g=>g.id===b.groupId);
+    return go!==0 ? go : a.order-b.order;
+  }), [classes, sortedGroups]);
   const classStats = sortedClasses.map(cl => {
     const sess=thisSessions.filter(s=>s.classId===cl.id);
     const sessIds=sess.map(s=>s.id);
