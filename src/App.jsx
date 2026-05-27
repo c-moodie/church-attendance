@@ -269,7 +269,7 @@ function Login({onLogin}) {
     if (!pw) return;
     setLoading(true); setErr("");
     const { error } = await supabase.auth.signInWithPassword({
-      email: "team@church-attendance.app",
+      email: "info@fbcmosinee.org",
       password: pw,
     });
     setLoading(false);
