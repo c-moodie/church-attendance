@@ -426,9 +426,6 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     setSaving(false); flash();
   };
 
-  const rowBg = (i, present) => present ? "rgba(12,140,110,0.07)" : i%2===0 ? "#f4f8ff" : "#fff";
-  const rowBorder = "#dce8fa";
-
   return (
     <div>
       <PageHeader title="Take Attendance"/>
@@ -483,9 +480,12 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
           {classMembers.map((person,i) => {
             const present=isPresent(person.id);
             const isHead=person._isHead||((!person.householdId));
+            // Heads: darker blue bg; non-heads: white; present: green tint
+            const bg = present ? "rgba(12,140,110,0.08)" : isHead ? "#f4f8ff" : "#ffffff";
+            const borderColor = present ? "#a7dfcc" : isHead ? "#dce8fa" : "#eef2f8";
             return (
-              <div key={person.id} onClick={()=>toggle(person.id)} style={{display:"flex",alignItems:"center",padding:isHead?"0.9rem 1.25rem":"0.7rem 1.25rem 0.7rem 2.5rem",cursor:saving?"not-allowed":"pointer",gap:14,borderRadius:10,border:`2px solid ${present?"#a7dfcc":rowBorder}`,background:rowBg(i,present),transition:"background 0.15s"}}>
-                <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,background:present?"#0c8c6e":"#c7d8f0",display:"flex",alignItems:"center",justifyContent:"center",color:present?"#fff":"#185fa5",fontSize:13,fontWeight:700}}>
+              <div key={person.id} onClick={()=>toggle(person.id)} style={{display:"flex",alignItems:"center",padding:isHead?"0.9rem 1.25rem":"0.7rem 1.25rem 0.7rem 2.5rem",cursor:saving?"not-allowed":"pointer",gap:14,borderRadius:10,border:`2px solid ${borderColor}`,background:bg,transition:"background 0.15s"}}>
+                <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,background:present?"#0c8c6e":isHead?"#c7d8f0":"#e8edf5",display:"flex",alignItems:"center",justifyContent:"center",color:present?"#fff":isHead?"#185fa5":"#6b7a96",fontSize:13,fontWeight:700}}>
                   {initials(person)}
                 </div>
                 <div style={{flex:1}}>
@@ -506,7 +506,7 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
 }
 
 // ─── People Page ──────────────────────────────────────────────────────────────
-function PeoplePage({groups,classes,people,setPeople,sessions,records,deletedNames,setDeletedNames}) {
+function PeoplePage({groups,classes,people,setPeople,sessions,records,setRecords,deletedNames,setDeletedNames}) {
   const [search,setSearch]=useState(""); const [modal,setModal]=useState(null);
   const [delConfirm,setDelConfirm]=useState(null); const [viewPerson,setViewPerson]=useState(null);
   const sorted = useMemo(() => [...people].sort((a,b)=>sortKey(a).localeCompare(sortKey(b))), [people]);
