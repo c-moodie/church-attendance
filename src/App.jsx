@@ -117,7 +117,7 @@ function StatCard({label,total,members,visitors,groupId,groups}) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [authed,  setAuthed]  = useState(() => sessionStorage.getItem("ca_auth") === "1");
+  const [authed,  setAuthed]  = useState(false);
   const [page,    setPage]    = useState("dashboard");
   const [navOpen, setNavOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -130,7 +130,20 @@ export default function App() {
   const [records,      setRecords]      = useState([]);
   const [deletedNames, setDeletedNames] = useState({});
 
-  // Load everything on mount
+  // Check for existing Supabase session on mount
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setAuthed(!!session);
+      if (!session) setLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthed(!!session);
+      if (!session) { setLoading(false); setGroups([]); setClasses([]); setPeople([]); setSessions([]); setRecords([]); }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load everything when authenticated
   useEffect(() => {
     if (!authed) return;
     (async () => {
@@ -155,7 +168,7 @@ export default function App() {
     })();
   }, [authed]);
 
-  if (!authed) return <Login onLogin={() => { sessionStorage.setItem("ca_auth","1"); setAuthed(true); }} />;
+  if (!authed && !loading) return <Login onLogin={() => setAuthed(true)} />;
 
   const navItems = [
     { id:"dashboard",  icon:"ti-dashboard",      label:"Dashboard"  },
@@ -202,7 +215,7 @@ export default function App() {
         <div style={{padding:"1.5rem 1.25rem 1rem",borderBottom:"1px solid rgba(255,255,255,0.08)"}}><LogoBlock/></div>
         <SidebarNav/>
         <div style={{padding:"1rem 1.25rem",borderTop:"1px solid rgba(255,255,255,0.08)"}}>
-          <button onClick={() => { sessionStorage.removeItem("ca_auth"); setAuthed(false); }} style={{display:"flex",alignItems:"center",gap:8,color:"rgba(255,255,255,0.45)",background:"none",border:"none",cursor:"pointer",fontSize:13,padding:"6px 0"}}>
+          <button onClick={() => supabase.auth.signOut()} style={{display:"flex",alignItems:"center",gap:8,color:"rgba(255,255,255,0.45)",background:"none",border:"none",cursor:"pointer",fontSize:13,padding:"6px 0"}}>
             <i className="ti ti-logout" style={{fontSize:16}}/>Sign out
           </button>
         </div>
@@ -251,8 +264,18 @@ export default function App() {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 function Login({onLogin}) {
-  const [pw,setPw]=useState(""); const [err,setErr]=useState(false);
-  const submit = () => { if(pw==="password") onLogin(); else { setErr(true); setTimeout(()=>setErr(false),2000); } };
+  const [pw,setPw]=useState(""); const [err,setErr]=useState(""); const [loading,setLoading]=useState(false);
+  const submit = async () => {
+    if (!pw) return;
+    setLoading(true); setErr("");
+    const { error } = await supabase.auth.signInWithPassword({
+      email: "team@church-attendance.app",
+      password: pw,
+    });
+    setLoading(false);
+    if (error) setErr("Incorrect password.");
+    else onLogin();
+  };
   return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0f1829",padding:"1rem"}}>
       <div style={{background:"#1a2744",borderRadius:16,padding:"2.5rem 2rem",width:"100%",maxWidth:380,boxShadow:"0 20px 60px rgba(0,0,0,0.4)"}}>
@@ -267,9 +290,11 @@ function Login({onLogin}) {
           <label style={{color:"rgba(255,255,255,0.7)",fontSize:13,display:"block",marginBottom:6}}>Password</label>
           <input type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} placeholder="Enter password"
             style={{width:"100%",padding:"11px 14px",borderRadius:8,border:`1px solid ${err?"#e24b4a":"rgba(255,255,255,0.15)"}`,background:"rgba(255,255,255,0.07)",color:"#fff",fontSize:15}}/>
-          {err && <p style={{color:"#e24b4a",fontSize:12,margin:"6px 0 0"}}>Incorrect password.</p>}
+          {err && <p style={{color:"#e24b4a",fontSize:12,margin:"6px 0 0"}}>{err}</p>}
         </div>
-        <button onClick={submit} style={{width:"100%",padding:"12px",borderRadius:8,background:"#3b5bdb",border:"none",color:"#fff",fontWeight:600,fontSize:15,cursor:"pointer"}}>Sign In</button>
+        <button onClick={submit} disabled={loading} style={{width:"100%",padding:"12px",borderRadius:8,background:"#3b5bdb",border:"none",color:"#fff",fontWeight:600,fontSize:15,cursor:loading?"not-allowed":"pointer",opacity:loading?0.7:1}}>
+          {loading ? "Signing in…" : "Sign In"}
+        </button>
       </div>
     </div>
   );
