@@ -411,15 +411,33 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
 
   useEffect(() => { setVisitors(session?.visitors||0); }, [selClass,selDate,sessions]);
 
+  // Ref-based lock so concurrent calls to ensureSession never double-create
+  const sessionCreating = useRef(false);
   const ensureSession = useCallback(async () => {
-    let s = sessions.find(s=>s.classId===selClass&&s.date===selDate);
-    if (!s) {
-      const newS = { id:uid(), class_id:selClass, date:selDate, visitors:0 };
-      const { data } = await supabase.from("sessions").upsert(newS).select().single();
-      s = mapSession(data);
-      setSessions(prev=>[...prev, s]);
+    // Return existing session from state if already there
+    const existing = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+    if (existing) return existing;
+    // Spin-wait if another call is already creating it
+    if (sessionCreating.current) {
+      await new Promise(r => setTimeout(r, 300));
+      const retry = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+      if (retry) return retry;
     }
-    return s;
+    sessionCreating.current = true;
+    try {
+      const newS = { id:uid(), class_id:selClass, date:selDate, visitors:0 };
+      // Use upsert with ON CONFLICT so duplicate inserts from race conditions are safe
+      const { data, error } = await supabase
+        .from("sessions")
+        .upsert(newS, { onConflict: "class_id,date" })
+        .select()
+        .single();
+      const s = mapSession(data);
+      setSessions(prev => prev.find(x=>x.classId===selClass&&x.date===selDate) ? prev : [...prev, s]);
+      return s;
+    } finally {
+      sessionCreating.current = false;
+    }
   }, [selClass, selDate, sessions, setSessions]);
 
   const toggle = async (pid) => {
@@ -428,9 +446,11 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     const ex = records.find(r=>r.sessionId===s.id&&r.personId===pid);
     const newPresent = ex ? !ex.present : true;
     const row = { id: ex?.id||uid(), session_id:s.id, person_id:pid, present:newPresent };
-    await supabase.from("records").upsert(row);
-    if (ex) setRecords(prev=>prev.map(r=>r.id===ex.id?{...r,present:newPresent}:r));
-    else    setRecords(prev=>[...prev,{id:row.id,sessionId:s.id,personId:pid,present:true}]);
+    const { error } = await supabase.from("records").upsert(row, { onConflict: "session_id,person_id" });
+    if (!error) {
+      if (ex) setRecords(prev=>prev.map(r=>r.id===ex.id?{...r,present:newPresent}:r));
+      else    setRecords(prev=>[...prev,{id:row.id,sessionId:s.id,personId:pid,present:true}]);
+    }
     setSaving(false); flash();
   };
 
@@ -441,16 +461,36 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     setVisitors(v); flash();
   };
 
+  // Chunk array into smaller pieces to avoid Supabase payload limits
+  const chunkArray = (arr, size) => Array.from({length:Math.ceil(arr.length/size)},(_,i)=>arr.slice(i*size,(i+1)*size));
+
   const markAll = async (present) => {
     setSaving(true);
     const s = await ensureSession();
-    const rows = classMembers.map(p => ({ id: records.find(r=>r.sessionId===s.id&&r.personId===p.id)?.id||uid(), session_id:s.id, person_id:p.id, present }));
-    await supabase.from("records").upsert(rows);
-    setRecords(prev => {
-      const updated = [...prev];
-      rows.forEach(row => { const idx=updated.findIndex(r=>r.sessionId===s.id&&r.personId===row.person_id); if(idx>=0) updated[idx]={...updated[idx],present}; else updated.push({id:row.id,sessionId:s.id,personId:row.person_id,present}); });
-      return updated;
-    });
+    const rows = classMembers.map(p => ({
+      id: records.find(r=>r.sessionId===s.id&&r.personId===p.id)?.id||uid(),
+      session_id: s.id,
+      person_id: p.id,
+      present
+    }));
+    // Send in chunks of 20 to stay well within Supabase free tier limits
+    const chunks = chunkArray(rows, 20);
+    let allOk = true;
+    for (const chunk of chunks) {
+      const { error } = await supabase.from("records").upsert(chunk, { onConflict: "session_id,person_id" });
+      if (error) { allOk = false; console.error("upsert chunk error:", error); }
+    }
+    if (allOk) {
+      setRecords(prev => {
+        const updated = [...prev];
+        rows.forEach(row => {
+          const idx = updated.findIndex(r=>r.sessionId===s.id&&r.personId===row.person_id);
+          if (idx>=0) updated[idx]={...updated[idx],present};
+          else updated.push({id:row.id,sessionId:s.id,personId:row.person_id,present});
+        });
+        return updated;
+      });
+    }
     setSaving(false); flash();
   };
 
