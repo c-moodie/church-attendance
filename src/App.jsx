@@ -378,13 +378,19 @@ function Dashboard({groups,classes,sessions,records,setPage}) {
 
 // ─── Attendance Page ──────────────────────────────────────────────────────────
 function AttendancePage({groups,classes,people,sessions,setSessions,records,setRecords}) {
-  const [selClass,setSelClass] = useState(() => [...classes].sort((a,b)=>a.order-b.order)[0]?.id || "");
-  const [selDate, setSelDate]  = useState(fmt(new Date()));
-  const [visitors,setVisitors] = useState(0);
-  const [saved,   setSaved]    = useState(false);
-  const [saving,  setSaving]   = useState(false);
   const sortedGroups  = useMemo(() => [...groups].sort((a,b)=>a.order-b.order),  [groups]);
   const sortedClasses = useMemo(() => [...classes].sort((a,b)=>a.order-b.order), [classes]);
+
+  const [selClass, setSelClass] = useState(() => sortedGroups.flatMap(g=>sortedClasses.filter(c=>c.groupId===g.id))[0]?.id || "");
+  const [selDate,  setSelDate]  = useState(fmt(new Date()));
+  const [visitors, setVisitors] = useState(0);
+  const [saving,   setSaving]   = useState(false);
+  const [saved,    setSaved]    = useState(false);
+
+  // Local attendance state — what's checked right now in the UI
+  const [localPresent, setLocalPresent] = useState({}); // { personId: bool }
+  const [dirty, setDirty] = useState(false);
+
   const cls = sortedClasses.find(c=>c.id===selClass);
   const grp = cls ? sortedGroups.find(g=>g.id===cls.groupId) : null;
   const pal = cls ? getGroupPalette(cls.groupId, sortedGroups) : null;
@@ -402,128 +408,93 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     return result;
   }, [people, selClass]);
 
-  const session = sessions.find(s=>s.classId===selClass&&s.date===selDate);
-  const sessionRecords = session ? records.filter(r=>r.sessionId===session.id) : [];
-  const isPresent = (pid) => { if(!session) return false; const r=sessionRecords.find(r=>r.personId===pid); return r?r.present:false; };
-  const presentCount = sessionRecords.filter(r=>r.present).length;
-  const curVisitors  = session?.visitors||0;
-  const flash = () => { setSaved(true); setTimeout(()=>setSaved(false),1500); };
-
-  useEffect(() => { setVisitors(session?.visitors||0); sessionRef.current = null; }, [selClass,selDate,sessions]);
-
-  // Use a ref for records so toggle always reads current state without stale closure
-  const recordsRef = useRef(records);
-  useEffect(() => { recordsRef.current = records; }, [records]);
-
-  // Use a ref for sessions too
-  const sessionsRef = useRef(sessions);
-  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
-
-  // Session creation lock
-  const sessionCreating = useRef(false);
-  const sessionRef = useRef(null); // cache the created session id
-
-  const ensureSession = useCallback(async () => {
-    // Check live ref (not stale closure)
-    const existing = sessionsRef.current.find(s=>s.classId===selClass&&s.date===selDate);
-    if (existing) { sessionRef.current = existing; return existing; }
-    if (sessionRef.current?.classId===selClass && sessionRef.current?.date===selDate) return sessionRef.current;
-    // Wait if already being created
-    if (sessionCreating.current) {
-      for (let i=0; i<20; i++) {
-        await new Promise(r=>setTimeout(r,100));
-        const s = sessionsRef.current.find(s=>s.classId===selClass&&s.date===selDate);
-        if (s) { sessionRef.current = s; return s; }
-        if (sessionRef.current?.classId===selClass && sessionRef.current?.date===selDate) return sessionRef.current;
-      }
-    }
-    sessionCreating.current = true;
-    try {
-      const newS = { id:uid(), class_id:selClass, date:selDate, visitors:0 };
-      const { data, error } = await supabase
-        .from("sessions")
-        .upsert(newS, { onConflict: "class_id,date" })
-        .select()
-        .single();
-      if (error) throw error;
-      const s = mapSession(data);
-      sessionRef.current = s;
-      setSessions(prev => prev.find(x=>x.classId===selClass&&x.date===selDate) ? prev : [...prev, s]);
-      return s;
-    } finally {
-      sessionCreating.current = false;
-    }
-  }, [selClass, selDate]);
-
-  const toggle = async (pid) => {
-    setSaving(true);
-    const s = await ensureSession();
-    if (!s) { setSaving(false); return; }
-    // Read from ref so we always have current state, not stale closure
-    const ex = recordsRef.current.find(r=>r.sessionId===s.id&&r.personId===pid);
-    const newPresent = ex ? !ex.present : true;
-    const rowId = ex?.id || uid();
-    // Optimistic update FIRST using functional updater (stacks correctly under rapid taps)
-    if (ex) {
-      setRecords(prev=>prev.map(r=>r.id===ex.id ? {...r,present:newPresent} : r));
+  // When class or date changes, load existing saved attendance into local state
+  useEffect(() => {
+    const session = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+    setVisitors(session?.visitors||0);
+    setDirty(false);
+    setSaved(false);
+    if (session) {
+      const sessionRecords = records.filter(r=>r.sessionId===session.id);
+      const present = {};
+      sessionRecords.forEach(r => { present[r.personId] = r.present; });
+      setLocalPresent(present);
     } else {
-      setRecords(prev=>[...prev, {id:rowId, sessionId:s.id, personId:pid, present:true}]);
+      setLocalPresent({});
     }
-    // Then persist to DB
-    const { error } = await supabase.from("records").upsert(
-      { id:rowId, session_id:s.id, person_id:pid, present:newPresent },
-      { onConflict: "session_id,person_id" }
-    );
-    if (error) {
-      console.error("toggle save error:", error);
-      // Roll back optimistic update on failure
-      if (ex) setRecords(prev=>prev.map(r=>r.id===ex.id ? {...r,present:ex.present} : r));
-      else    setRecords(prev=>prev.filter(r=>!(r.sessionId===s.id&&r.personId===pid)));
-    }
-    setSaving(false); flash();
+  }, [selClass, selDate, sessions, records]);
+
+  const toggle = (pid) => {
+    setLocalPresent(prev => ({ ...prev, [pid]: !prev[pid] }));
+    setDirty(true);
+    setSaved(false);
   };
 
-  const updateVisitors = async (v) => {
-    const s = await ensureSession();
-    await supabase.from("sessions").update({visitors:v}).eq("id",s.id);
-    setSessions(prev=>prev.map(x=>x.id===s.id?{...x,visitors:v}:x));
-    setVisitors(v); flash();
+  const markAll = (present) => {
+    const next = {};
+    classMembers.forEach(p => { next[p.id] = present; });
+    setLocalPresent(next);
+    setDirty(true);
+    setSaved(false);
   };
 
-  const markAll = async (present) => {
+  const handleSave = async () => {
     setSaving(true);
-    const s = await ensureSession();
-    if (!s) { setSaving(false); return; }
-    const currentRecords = recordsRef.current;
-    const rows = classMembers.map(p => ({
-      id: currentRecords.find(r=>r.sessionId===s.id&&r.personId===p.id)?.id || uid(),
-      session_id: s.id,
-      person_id: p.id,
-      present
-    }));
-    // Optimistic update immediately
-    setRecords(prev => {
-      const updated = [...prev];
-      rows.forEach(row => {
-        const idx = updated.findIndex(r=>r.sessionId===s.id&&r.personId===row.person_id);
-        if (idx>=0) updated[idx]={...updated[idx],present};
-        else updated.push({id:row.id,sessionId:s.id,personId:row.person_id,present});
+    try {
+      // 1. Ensure session exists
+      let session = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+      if (!session) {
+        const newS = { id:uid(), class_id:selClass, date:selDate, visitors };
+        const { data, error } = await supabase.from("sessions").upsert(newS, {onConflict:"class_id,date"}).select().single();
+        if (error) throw error;
+        session = mapSession(data);
+        setSessions(prev=>[...prev, session]);
+      } else if (session.visitors !== visitors) {
+        // Update visitors if changed
+        await supabase.from("sessions").update({visitors}).eq("id", session.id);
+        setSessions(prev=>prev.map(s=>s.id===session.id ? {...s,visitors} : s));
+      }
+
+      // 2. Build all record rows for every class member
+      const rows = classMembers.map(p => ({
+        id: records.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
+        session_id: session.id,
+        person_id: p.id,
+        present: localPresent[p.id] === true,
+      }));
+
+      // 3. Send in chunks of 25
+      for (let i=0; i<rows.length; i+=25) {
+        const chunk = rows.slice(i, i+25);
+        const { error } = await supabase.from("records").upsert(chunk, {onConflict:"session_id,person_id"});
+        if (error) throw error;
+      }
+
+      // 4. Update local records state
+      setRecords(prev => {
+        const next = prev.filter(r=>r.sessionId!==session.id || !classMembers.find(p=>p.id===r.personId));
+        rows.forEach(r => next.push({id:r.id, sessionId:session.id, personId:r.person_id, present:r.present}));
+        return next;
       });
-      return updated;
-    });
-    // Persist in chunks of 20
-    const chunks = [];
-    for (let i=0; i<rows.length; i+=20) chunks.push(rows.slice(i,i+20));
-    for (const chunk of chunks) {
-      const { error } = await supabase.from("records").upsert(chunk, { onConflict: "session_id,person_id" });
-      if (error) console.error("markAll chunk error:", error);
+
+      setDirty(false);
+      setSaved(true);
+      setTimeout(()=>setSaved(false), 3000);
+    } catch(err) {
+      console.error("Save failed:", err);
+      alert("Save failed: " + (err.message || "unknown error. Please try again."));
+    } finally {
+      setSaving(false);
     }
-    setSaving(false); flash();
   };
+
+  const presentCount = classMembers.filter(p=>localPresent[p.id]===true).length;
 
   return (
     <div>
       <PageHeader title="Take Attendance"/>
+
+      {/* Config card */}
       <div style={{background:"var(--color-background-primary)",border:"1px solid var(--color-border-tertiary)",borderRadius:12,padding:"1.25rem",marginBottom:"1.25rem"}}>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:"1rem"}}>
           <div>
@@ -553,34 +524,34 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <label style={{fontSize:13,color:"var(--color-text-secondary)",whiteSpace:"nowrap"}}>Visitors:</label>
-            <input type="number" min={0} value={visitors} onChange={e=>updateVisitors(Math.max(0,parseInt(e.target.value)||0))}
+            <input type="number" min={0} value={visitors}
+              onChange={e=>{setVisitors(Math.max(0,parseInt(e.target.value)||0)); setDirty(true); setSaved(false);}}
               style={{width:70,padding:"7px 10px",border:"1px solid var(--color-border-tertiary)",borderRadius:8,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",fontSize:14,textAlign:"center"}}/>
           </div>
-          <div style={{marginLeft:"auto",display:"flex",gap:12,alignItems:"center"}}>
-            {saving && <span style={{fontSize:13,color:"#8896b0"}}>Saving…</span>}
-            {saved  && <span style={{fontSize:13,color:"#0c8c6e",fontWeight:600}}>✓ Saved</span>}
-            <span style={{fontSize:13,color:"var(--color-text-secondary)"}}>{presentCount} present · {curVisitors} visitors</span>
-          </div>
+          <span style={{fontSize:13,color:"var(--color-text-secondary)",marginLeft:"auto"}}>{presentCount} present · {visitors} visitors</span>
         </div>
       </div>
+
+      {/* Toolbar */}
       <div style={{display:"flex",gap:8,marginBottom:"1rem",alignItems:"center",flexWrap:"wrap"}}>
         <span style={{fontSize:14,color:"var(--color-text-secondary)"}}>{classMembers.length} members</span>
-        <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,marginLeft:"auto",alignItems:"center"}}>
           <button onClick={()=>markAll(true)}  style={{padding:"6px 12px",fontSize:12,border:"1px solid var(--color-border-tertiary)",borderRadius:6,background:"var(--color-background-secondary)",cursor:"pointer",color:"var(--color-text-primary)"}}>Mark All Present</button>
           <button onClick={()=>markAll(false)} style={{padding:"6px 12px",fontSize:12,border:"1px solid var(--color-border-tertiary)",borderRadius:6,background:"var(--color-background-secondary)",cursor:"pointer",color:"var(--color-text-primary)"}}>Clear All</button>
         </div>
       </div>
+
+      {/* People list — purely local state, no DB calls on tap */}
       {classMembers.length===0 ? <Empty msg="No members assigned to this class"/> : (
         <div style={{display:"flex",flexDirection:"column",gap:3}}>
-          {classMembers.map((person,i) => {
-            const present=isPresent(person.id);
-            const isHead=person._isHead||((!person.householdId));
-            // Heads: darker blue bg; non-heads: white; present: green tint
-            const bg = present ? "rgba(12,140,110,0.08)" : isHead ? "#f4f8ff" : "#ffffff";
-            const borderColor = present ? "#a7dfcc" : isHead ? "#dce8fa" : "#eef2f8";
+          {classMembers.map((person) => {
+            const present = localPresent[person.id] === true;
+            const isHead  = person._isHead || !person.householdId;
+            const bg          = present ? "rgba(12,140,110,0.08)" : isHead ? "#f4f8ff" : "#ffffff";
+            const borderColor = present ? "#a7dfcc"              : isHead ? "#dce8fa" : "#eef2f8";
             return (
-              <div key={person.id} onClick={()=>toggle(person.id)} style={{display:"flex",alignItems:"center",padding:isHead?"0.9rem 1.25rem":"0.7rem 1.25rem 0.7rem 2.5rem",cursor:saving?"not-allowed":"pointer",gap:14,borderRadius:10,border:`2px solid ${borderColor}`,background:bg,transition:"background 0.15s"}}>
-                <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,background:present?"#0c8c6e":isHead?"#c7d8f0":"#e8edf5",display:"flex",alignItems:"center",justifyContent:"center",color:present?"#fff":isHead?"#185fa5":"#6b7a96",fontSize:13,fontWeight:700}}>
+              <div key={person.id} onClick={()=>toggle(person.id)} style={{display:"flex",alignItems:"center",padding:isHead?"0.9rem 1.25rem":"0.7rem 1.25rem 0.7rem 2.5rem",cursor:"pointer",gap:14,borderRadius:10,border:`2px solid ${borderColor}`,background:bg,transition:"background 0.1s",userSelect:"none"}}>
+                <div style={{width:38,height:38,borderRadius:"50%",flexShrink:0,background:present?"#0c8c6e":isHead?"#c7d8f0":"#e8edf5",display:"flex",alignItems:"center",justifyContent:"center",color:present?"#fff":isHead?"#185fa5":"#6b7a96",fontSize:13,fontWeight:700,transition:"background 0.1s"}}>
                   {initials(person)}
                 </div>
                 <div style={{flex:1}}>
@@ -588,7 +559,7 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
                   {!isHead && <p style={{margin:0,fontSize:11,color:"#8896b0"}}>{person.householdRole==="spouse"?"Spouse":"Child"}</p>}
                   {person.phone && <p style={{margin:0,fontSize:12,color:"var(--color-text-secondary)"}}>{person.phone}</p>}
                 </div>
-                <div style={{width:28,height:28,borderRadius:"50%",border:`2px solid ${present?"#0c8c6e":"#b0bfd6"}`,background:present?"#0c8c6e":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                <div style={{width:28,height:28,borderRadius:"50%",border:`2px solid ${present?"#0c8c6e":"#b0bfd6"}`,background:present?"#0c8c6e":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.1s"}}>
                   {present && <i className="ti ti-check" style={{color:"#fff",fontSize:14}}/>}
                 </div>
               </div>
@@ -596,6 +567,21 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
           })}
         </div>
       )}
+
+      {/* Sticky save button */}
+      <div style={{position:"sticky",bottom:0,padding:"1rem 0 0.5rem",background:"linear-gradient(transparent, var(--color-background-tertiary) 40%)",marginTop:"1rem"}}>
+        <button
+          onClick={handleSave}
+          disabled={saving || (!dirty && !saved)}
+          style={{
+            width:"100%",padding:"14px",borderRadius:10,fontSize:16,fontWeight:700,cursor:saving?"wait":(!dirty&&!saved)?"default":"pointer",
+            background: saved ? "#0c8c6e" : dirty ? "#3b5bdb" : "#9ab0d6",
+            color:"#fff",border:"none",transition:"background 0.2s",
+            boxShadow: dirty ? "0 4px 16px rgba(59,91,219,0.35)" : "none",
+          }}>
+          {saving ? "Saving…" : saved ? "✓ Saved!" : dirty ? "Save Attendance" : "No changes"}
+        </button>
+      </div>
     </div>
   );
 }
