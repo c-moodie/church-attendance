@@ -478,31 +478,50 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         setSessions(prev=>prev.map(s=>s.id===session.id ? {...s,visitors} : s));
       }
 
-      // 2. Build record rows — one per class member, present = whatever is in localPresentRef
-      const rows = currentMembers.map(p => ({
+      // 2. Build rows — split into present and absent
+      const allRows = currentMembers.map(p => ({
         id: currentRecords.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
         session_id: session.id,
         person_id: p.id,
         present: currentPresent[p.id] === true,
       }));
 
-      const presentRows = rows.filter(r=>r.present);
-      console.log(`Writing ${rows.length} rows, ${presentRows.length} present:`, presentRows.map(r=>r.person_id));
+      const presentRows = allRows.filter(r => r.present);
+      const absentIds   = allRows.filter(r => !r.present).map(r => r.person_id);
 
-      // 3. Send in chunks of 25
-      for (let i=0; i<rows.length; i+=25) {
-        const chunk = rows.slice(i, i+25);
-        const { error } = await supabase.from("records").upsert(chunk, {onConflict:"session_id,person_id"});
-        if (error) throw error;
+      console.log('Saving present:', presentRows.map(r=>r.person_id), 'clearing absent:', absentIds.length);
+
+      // 3a. Upsert only the present=true rows
+      if (presentRows.length > 0) {
+        for (let i=0; i<presentRows.length; i+=25) {
+          const chunk = presentRows.slice(i, i+25);
+          const { error } = await supabase.from("records").upsert(chunk, {onConflict:"session_id,person_id"});
+          if (error) throw error;
+        }
       }
 
-      // 4. Update local records state
+      // 3b. Delete any existing records for absent people (so unchecking actually clears)
+      if (absentIds.length > 0) {
+        for (let i=0; i<absentIds.length; i+=25) {
+          const chunk = absentIds.slice(i, i+25);
+          const { error } = await supabase.from("records")
+            .delete()
+            .eq("session_id", session.id)
+            .in("person_id", chunk);
+          if (error) throw error;
+        }
+      }
+
+      // 4. Update local records state — only keep present rows
       setRecords(prev => {
-        const next = prev.filter(r=>r.sessionId!==session.id || !currentMembers.find(p=>p.id===r.personId));
-        rows.forEach(r => next.push({id:r.id, sessionId:session.id, personId:r.person_id, present:r.present}));
+        const next = prev.filter(r => !(r.sessionId===session.id && currentMembers.find(p=>p.id===r.personId)));
+        presentRows.forEach(r => next.push({id:r.id, sessionId:session.id, personId:r.person_id, present:true}));
         return next;
       });
-      recordsRef.current = [...recordsRef.current.filter(r=>r.sessionId!==session.id||!currentMembers.find(p=>p.id===r.personId)), ...rows.map(r=>({id:r.id,sessionId:session.id,personId:r.person_id,present:r.present}))];
+      recordsRef.current = [
+        ...recordsRef.current.filter(r => !(r.sessionId===session.id && currentMembers.find(p=>p.id===r.personId))),
+        ...presentRows.map(r => ({id:r.id, sessionId:session.id, personId:r.person_id, present:true}))
+      ];
 
       setDirty(false);
       setSaved(true);
