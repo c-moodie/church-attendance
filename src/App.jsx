@@ -392,8 +392,10 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
   const [dirty, setDirty] = useState(false);
 
   // Always-current refs so effects/callbacks never use stale closures
-  const sessionsRef = useRef(sessions);
-  const recordsRef  = useRef(records);
+  const sessionsRef    = useRef(sessions);
+  const recordsRef     = useRef(records);
+  const localPresentRef = useRef({});
+  const classMembersRef = useRef([]);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   useEffect(() => { recordsRef.current  = records;  }, [records]);
 
@@ -421,56 +423,71 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     setVisitors(session?.visitors||0);
     setDirty(false);
     setSaved(false);
+    const present = {};
     if (session) {
-      const present = {};
       recordsRef.current.filter(r=>r.sessionId===session.id).forEach(r => { present[r.personId] = r.present; });
-      setLocalPresent(present);
-    } else {
-      setLocalPresent({});
     }
+    localPresentRef.current = present;
+    setLocalPresent(present);
   }, [selClass, selDate]); // only re-run when user switches class or date
 
   const toggle = (pid) => {
-    setLocalPresent(prev => ({ ...prev, [pid]: !prev[pid] }));
+    setLocalPresent(prev => {
+      const next = { ...prev, [pid]: !prev[pid] };
+      localPresentRef.current = next;
+      return next;
+    });
     setDirty(true);
     setSaved(false);
   };
 
   const markAll = (present) => {
     const next = {};
-    classMembers.forEach(p => { next[p.id] = present; });
+    classMembersRef.current.forEach(p => { next[p.id] = present; });
+    localPresentRef.current = next;
     setLocalPresent(next);
     setDirty(true);
     setSaved(false);
   };
 
+  // Keep classMembersRef in sync
+  useEffect(() => { classMembersRef.current = classMembers; }, [classMembers]);
+
   const handleSave = async () => {
     setSaving(true);
     try {
+      // Read everything from refs — guaranteed current, no stale closures
+      const currentSessions    = sessionsRef.current;
+      const currentRecords     = recordsRef.current;
+      const currentPresent     = localPresentRef.current;
+      const currentMembers     = classMembersRef.current;
+
+      console.log('SAVE pressed. localPresent:', currentPresent, 'members:', currentMembers.length, 'present count:', Object.values(currentPresent).filter(Boolean).length);
+
       // 1. Ensure session exists
-      let session = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+      let session = currentSessions.find(s=>s.classId===selClass&&s.date===selDate);
       if (!session) {
         const newS = { id:uid(), class_id:selClass, date:selDate, visitors };
         const { data, error } = await supabase.from("sessions").upsert(newS, {onConflict:"class_id,date"}).select().single();
         if (error) throw error;
         session = mapSession(data);
         setSessions(prev=>[...prev, session]);
+        sessionsRef.current = [...currentSessions, session];
       } else if (session.visitors !== visitors) {
-        // Update visitors if changed
         await supabase.from("sessions").update({visitors}).eq("id", session.id);
         setSessions(prev=>prev.map(s=>s.id===session.id ? {...s,visitors} : s));
       }
 
-      // 2. Build record rows from localPresent (everyone shown in the UI, not just class-assigned members)
-      // Use all people currently rendered — classMembers is the source of truth for who appears
-      const rows = classMembers.map(p => ({
-        id: recordsRef.current.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
+      // 2. Build record rows — one per class member, present = whatever is in localPresentRef
+      const rows = currentMembers.map(p => ({
+        id: currentRecords.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
         session_id: session.id,
         person_id: p.id,
-        present: localPresent[p.id] === true,
+        present: currentPresent[p.id] === true,
       }));
 
-      console.log(`Saving ${rows.length} records for session ${session.id}. Present: ${rows.filter(r=>r.present).length}`, rows.map(r=>r.person_id+'='+r.present));
+      const presentRows = rows.filter(r=>r.present);
+      console.log(`Writing ${rows.length} rows, ${presentRows.length} present:`, presentRows.map(r=>r.person_id));
 
       // 3. Send in chunks of 25
       for (let i=0; i<rows.length; i+=25) {
@@ -481,10 +498,11 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
 
       // 4. Update local records state
       setRecords(prev => {
-        const next = prev.filter(r=>r.sessionId!==session.id || !classMembers.find(p=>p.id===r.personId));
+        const next = prev.filter(r=>r.sessionId!==session.id || !currentMembers.find(p=>p.id===r.personId));
         rows.forEach(r => next.push({id:r.id, sessionId:session.id, personId:r.person_id, present:r.present}));
         return next;
       });
+      recordsRef.current = [...recordsRef.current.filter(r=>r.sessionId!==session.id||!currentMembers.find(p=>p.id===r.personId)), ...rows.map(r=>({id:r.id,sessionId:session.id,personId:r.person_id,present:r.present}))];
 
       setDirty(false);
       setSaved(true);
