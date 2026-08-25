@@ -391,6 +391,12 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
   const [localPresent, setLocalPresent] = useState({}); // { personId: bool }
   const [dirty, setDirty] = useState(false);
 
+  // Always-current refs so effects/callbacks never use stale closures
+  const sessionsRef = useRef(sessions);
+  const recordsRef  = useRef(records);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  useEffect(() => { recordsRef.current  = records;  }, [records]);
+
   const cls = sortedClasses.find(c=>c.id===selClass);
   const grp = cls ? sortedGroups.find(g=>g.id===cls.groupId) : null;
   const pal = cls ? getGroupPalette(cls.groupId, sortedGroups) : null;
@@ -408,21 +414,21 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
     return result;
   }, [people, selClass]);
 
-  // When class or date changes, load existing saved attendance into local state
+  // Load saved attendance when class or date changes — reads via refs so no stale data
+  // and no risk of re-firing when records update after a save
   useEffect(() => {
-    const session = sessions.find(s=>s.classId===selClass&&s.date===selDate);
+    const session = sessionsRef.current.find(s=>s.classId===selClass&&s.date===selDate);
     setVisitors(session?.visitors||0);
     setDirty(false);
     setSaved(false);
     if (session) {
-      const sessionRecords = records.filter(r=>r.sessionId===session.id);
       const present = {};
-      sessionRecords.forEach(r => { present[r.personId] = r.present; });
+      recordsRef.current.filter(r=>r.sessionId===session.id).forEach(r => { present[r.personId] = r.present; });
       setLocalPresent(present);
     } else {
       setLocalPresent({});
     }
-  }, [selClass, selDate, sessions, records]);
+  }, [selClass, selDate]); // only re-run when user switches class or date
 
   const toggle = (pid) => {
     setLocalPresent(prev => ({ ...prev, [pid]: !prev[pid] }));
@@ -455,13 +461,16 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         setSessions(prev=>prev.map(s=>s.id===session.id ? {...s,visitors} : s));
       }
 
-      // 2. Build all record rows for every class member
+      // 2. Build record rows from localPresent (everyone shown in the UI, not just class-assigned members)
+      // Use all people currently rendered — classMembers is the source of truth for who appears
       const rows = classMembers.map(p => ({
-        id: records.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
+        id: recordsRef.current.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
         session_id: session.id,
         person_id: p.id,
         present: localPresent[p.id] === true,
       }));
+
+      console.log(`Saving ${rows.length} records for session ${session.id}. Present: ${rows.filter(r=>r.present).length}`, rows.map(r=>r.person_id+'='+r.present));
 
       // 3. Send in chunks of 25
       for (let i=0; i<rows.length; i+=25) {
