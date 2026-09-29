@@ -468,15 +468,53 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
 
       console.log('Saving attendance:', selClass, selDate, 'present:', presentIds);
 
-      // Single atomic RPC call — one round trip, all-or-nothing transaction
-      const { data, error } = await supabase.rpc('record_attendance', {
-        p_class_id:   selClass,
-        p_date:       selDate,
-        p_visitors:   visitors,
-        p_present_ids: presentIds,
-      });
+      // Direct REST approach - no RPC needed
+      const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      const headers = {
+        'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      };
 
-      if (error) throw error;
+      // 1. Upsert session
+      const sessResp = await fetch(
+        `${SUPABASE_URL}/rest/v1/sessions?on_conflict=class_id,date`,
+        {
+          method: 'POST',
+          headers: { ...headers, 'Prefer': 'resolution=merge-duplicates,return=representation' },
+          body: JSON.stringify({ id: uid(), class_id: selClass, date: selDate, visitors }),
+        }
+      );
+      if (!sessResp.ok) throw new Error(`Session upsert failed: ${await sessResp.text()}`);
+      const sessData = await sessResp.json();
+      const sessionId = sessData[0]?.id;
+      if (!sessionId) throw new Error('No session ID returned');
+
+      // 2. Delete all existing records for this session in one call
+      const delResp = await fetch(
+        `${SUPABASE_URL}/rest/v1/records?session_id=eq.${sessionId}`,
+        { method: 'DELETE', headers }
+      );
+      if (!delResp.ok) throw new Error(`Delete failed: ${await delResp.text()}`);
+
+      // 3. Insert present records in one single POST (all rows at once)
+      if (presentIds.length > 0) {
+        const rows = presentIds.map(pid => ({
+          id: uid(),
+          session_id: sessionId,
+          person_id: pid,
+          present: true,
+        }));
+        const insResp = await fetch(
+          `${SUPABASE_URL}/rest/v1/records`,
+          { method: 'POST', headers, body: JSON.stringify(rows) }
+        );
+        if (!insResp.ok) throw new Error(`Insert failed: ${await insResp.text()}`);
+      }
+
+      const data = { session_id: sessionId, saved: presentIds.length };
 
       const sessionId = data.session_id;
 
