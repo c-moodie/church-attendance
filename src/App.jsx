@@ -469,11 +469,11 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
       console.log('Saving attendance:', selClass, selDate, 'present:', presentIds);
 
       // Single atomic RPC call — one round trip, all-or-nothing transaction
-      const { data, error } = await supabase.rpc('save_attendance', {
-        p_class_id:          selClass,
-        p_date:              selDate,
-        p_visitors:          visitors,
-        p_present_person_ids: presentIds,
+      const { data, error } = await supabase.rpc('record_attendance', {
+        p_class_id:   selClass,
+        p_date:       selDate,
+        p_visitors:   visitors,
+        p_present_ids: presentIds,
       });
 
       if (error) throw error;
