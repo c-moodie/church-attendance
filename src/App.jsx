@@ -456,76 +456,59 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Read everything from refs — guaranteed current, no stale closures
       const currentSessions    = sessionsRef.current;
       const currentRecords     = recordsRef.current;
       const currentPresent     = localPresentRef.current;
       const currentMembers     = classMembersRef.current;
 
-      console.log('SAVE pressed. localPresent:', currentPresent, 'members:', currentMembers.length, 'present count:', Object.values(currentPresent).filter(Boolean).length);
+      // Collect just the IDs of people marked present
+      const presentIds = currentMembers
+        .filter(p => currentPresent[p.id] === true)
+        .map(p => p.id);
 
-      // 1. Ensure session exists
-      let session = currentSessions.find(s=>s.classId===selClass&&s.date===selDate);
-      if (!session) {
-        const newS = { id:uid(), class_id:selClass, date:selDate, visitors };
-        const { data, error } = await supabase.from("sessions").upsert(newS, {onConflict:"class_id,date"}).select().single();
-        if (error) throw error;
-        session = mapSession(data);
-        setSessions(prev=>[...prev, session]);
-        sessionsRef.current = [...currentSessions, session];
-      } else if (session.visitors !== visitors) {
-        await supabase.from("sessions").update({visitors}).eq("id", session.id);
-        setSessions(prev=>prev.map(s=>s.id===session.id ? {...s,visitors} : s));
-      }
+      console.log('Saving attendance:', selClass, selDate, 'present:', presentIds);
 
-      // 2. Build rows — split into present and absent
-      const allRows = currentMembers.map(p => ({
-        id: currentRecords.find(r=>r.sessionId===session.id&&r.personId===p.id)?.id || uid(),
-        session_id: session.id,
-        person_id: p.id,
-        present: currentPresent[p.id] === true,
-      }));
-
-      const presentRows = allRows.filter(r => r.present);
-      const absentIds   = allRows.filter(r => !r.present).map(r => r.person_id);
-
-      console.log('Saving present:', presentRows.map(r=>r.person_id), 'clearing absent:', absentIds.length);
-
-      // 3a. Upsert only the present=true rows
-      if (presentRows.length > 0) {
-        for (let i=0; i<presentRows.length; i+=25) {
-          const chunk = presentRows.slice(i, i+25);
-          const { error } = await supabase.from("records").upsert(chunk, {onConflict:"session_id,person_id"});
-          if (error) throw error;
-        }
-      }
-
-      // 3b. Delete any existing records for absent people (so unchecking actually clears)
-      if (absentIds.length > 0) {
-        for (let i=0; i<absentIds.length; i+=25) {
-          const chunk = absentIds.slice(i, i+25);
-          const { error } = await supabase.from("records")
-            .delete()
-            .eq("session_id", session.id)
-            .in("person_id", chunk);
-          if (error) throw error;
-        }
-      }
-
-      // 4. Update local records state — only keep present rows
-      setRecords(prev => {
-        const next = prev.filter(r => !(r.sessionId===session.id && currentMembers.find(p=>p.id===r.personId)));
-        presentRows.forEach(r => next.push({id:r.id, sessionId:session.id, personId:r.person_id, present:true}));
-        return next;
+      // Single atomic RPC call — one round trip, all-or-nothing transaction
+      const { data, error } = await supabase.rpc('save_attendance', {
+        p_class_id:          selClass,
+        p_date:              selDate,
+        p_visitors:          visitors,
+        p_present_person_ids: presentIds,
       });
+
+      if (error) throw error;
+
+      const sessionId = data.session_id;
+
+      // Update local state to match what was saved
+      const existingSession = currentSessions.find(s=>s.classId===selClass&&s.date===selDate);
+      if (!existingSession) {
+        const newSess = { id: sessionId, classId: selClass, date: selDate, visitors };
+        setSessions(prev => [...prev, newSess]);
+        sessionsRef.current = [...currentSessions, newSess];
+      } else {
+        setSessions(prev => prev.map(s => s.id===existingSession.id ? {...s, visitors} : s));
+      }
+
+      // Rebuild records for this session — only present entries
+      const newRecords = presentIds.map(pid => ({
+        id: currentRecords.find(r=>r.sessionId===sessionId&&r.personId===pid)?.id || 'saved',
+        sessionId,
+        personId: pid,
+        present: true,
+      }));
+      setRecords(prev => [
+        ...prev.filter(r => r.sessionId !== sessionId),
+        ...newRecords,
+      ]);
       recordsRef.current = [
-        ...recordsRef.current.filter(r => !(r.sessionId===session.id && currentMembers.find(p=>p.id===r.personId))),
-        ...presentRows.map(r => ({id:r.id, sessionId:session.id, personId:r.person_id, present:true}))
+        ...recordsRef.current.filter(r => r.sessionId !== sessionId),
+        ...newRecords,
       ];
 
       setDirty(false);
       setSaved(true);
-      setTimeout(()=>setSaved(false), 3000);
+      setTimeout(() => setSaved(false), 3000);
     } catch(err) {
       console.error("Save failed:", err);
       alert("Save failed: " + (err.message || "unknown error. Please try again."));
