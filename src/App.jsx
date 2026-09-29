@@ -514,10 +514,6 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         if (!insResp.ok) throw new Error(`Insert failed: ${await insResp.text()}`);
       }
 
-      const data = { session_id: sessionId, saved: presentIds.length };
-
-      const sessionId = data.session_id;
-
       // Update local state to match what was saved
       const existingSession = currentSessions.find(s=>s.classId===selClass&&s.date===selDate);
       if (!existingSession) {
