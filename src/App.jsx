@@ -148,13 +148,24 @@ export default function App() {
     if (!authed) return;
     (async () => {
       setLoading(true);
+      // Supabase returns at most 1000 rows per request, so page through every table
+      const fetchAll = async (table, orderCol = "id") => {
+        let all = [];
+        for (let from = 0; ; from += 1000) {
+          const { data, error } = await supabase.from(table).select("*").order(orderCol).range(from, from + 999);
+          if (error) { console.error(`Load ${table} failed:`, error); break; }
+          all = all.concat(data || []);
+          if (!data || data.length < 1000) break;
+        }
+        return { data: all };
+      };
       const [g, cl, p, s, r, dn] = await Promise.all([
-        supabase.from("groups").select("*").order("order"),
-        supabase.from("classes").select("*").order("order"),
-        supabase.from("people").select("*"),
-        supabase.from("sessions").select("*"),
-        supabase.from("records").select("*"),
-        supabase.from("deleted_names").select("*"),
+        fetchAll("groups", "order"),
+        fetchAll("classes", "order"),
+        fetchAll("people"),
+        fetchAll("sessions"),
+        fetchAll("records"),
+        fetchAll("deleted_names", "person_id"),
       ]);
       setGroups((g.data||[]).map(mapGroup));
       setClasses((cl.data||[]).map(mapClass));
@@ -478,19 +489,24 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         'Prefer': 'return=representation',
       };
 
-      // 1. Upsert session
-      const sessResp = await fetch(
-        `${SUPABASE_URL}/rest/v1/sessions?on_conflict=class_id,date`,
-        {
-          method: 'POST',
-          headers: { ...headers, 'Prefer': 'resolution=merge-duplicates,return=representation' },
-          body: JSON.stringify({ id: uid(), class_id: selClass, date: selDate, visitors }),
-        }
+      // 1. Find existing session for this class+date, or create one (never change an existing ID)
+      const findResp = await fetch(
+        `${SUPABASE_URL}/rest/v1/sessions?class_id=eq.${encodeURIComponent(selClass)}&date=eq.${selDate}&select=id`,
+        { headers }
       );
-      if (!sessResp.ok) throw new Error(`Session upsert failed: ${await sessResp.text()}`);
-      const sessData = await sessResp.json();
-      const sessionId = sessData[0]?.id;
-      if (!sessionId) throw new Error('No session ID returned');
+      if (!findResp.ok) throw new Error(`Session lookup failed: ${await findResp.text()}`);
+      const found = await findResp.json();
+      let sessionId = found[0]?.id;
+      if (sessionId) {
+        const updResp = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${sessionId}`,
+          { method: 'PATCH', headers, body: JSON.stringify({ visitors }) });
+        if (!updResp.ok) throw new Error(`Session update failed: ${await updResp.text()}`);
+      } else {
+        sessionId = uid();
+        const insSess = await fetch(`${SUPABASE_URL}/rest/v1/sessions`,
+          { method: 'POST', headers, body: JSON.stringify({ id: sessionId, class_id: selClass, date: selDate, visitors }) });
+        if (!insSess.ok) throw new Error(`Session create failed: ${await insSess.text()}`);
+      }
 
       // 2. Delete all existing records for this session in one call
       const delResp = await fetch(
@@ -513,6 +529,17 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
         );
         if (!insResp.ok) throw new Error(`Insert failed: ${await insResp.text()}`);
       }
+
+      // 4. Verify: read back what's actually in the database for this session
+      const verResp = await fetch(
+        `${SUPABASE_URL}/rest/v1/records?session_id=eq.${sessionId}&present=eq.true&select=person_id`,
+        { headers }
+      );
+      const verified = verResp.ok ? await verResp.json() : [];
+      if (verified.length !== presentIds.length) {
+        throw new Error(`Only ${verified.length} of ${presentIds.length} people were confirmed in the database. Please try saving again.`);
+      }
+      console.log(`Verified ${verified.length} present records in database for session ${sessionId}`);
 
       // Update local state to match what was saved
       const existingSession = currentSessions.find(s=>s.classId===selClass&&s.date===selDate);
@@ -642,7 +669,7 @@ function AttendancePage({groups,classes,people,sessions,setSessions,records,setR
             color:"#fff",border:"none",transition:"background 0.2s",
             boxShadow: dirty ? "0 4px 16px rgba(59,91,219,0.35)" : "none",
           }}>
-          {saving ? "Saving…" : saved ? "✓ Saved!" : dirty ? "Save Attendance" : "No changes"}
+          {saving ? "Saving…" : saved ? `✓ Saved — ${presentCount} present` : dirty ? "Save Attendance" : "No changes"}
         </button>
       </div>
     </div>
